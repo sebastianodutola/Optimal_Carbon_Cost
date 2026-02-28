@@ -1,18 +1,18 @@
 from dataclasses import dataclass
-from datetime import datetime, date, time, timedelta
-from typing import Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 import numpy as np
 import pandas as pd
+from collections import deque
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 
 @dataclass
-class Charge:
+class ChargeSlot:
     start_time: np.datetime64
-    end_time: np.datetime64
-    delta_E: float
-    carbon_cost: float  # gC0_2eq
+    duration: np.timedelta64
+    carbon_intensity: float  # gCO_2eq/kWh
 
 
 @dataclass(order=True)
@@ -28,6 +28,7 @@ class Load:
     charging_rate: float  # kW
     discharges: np.ndarray[Discharge]
     efficiency: float = 1  # (0,1]
+    initial_charge_percent: float = 0  # (0,1] %
 
 
 @dataclass
@@ -39,8 +40,8 @@ class Forecast:
     # actual carbon intensity if it exists
     a_carbon_intensity: np.ndarray[float]
 
-    def __len__():
-        return time.shape(0)
+    def __len__(self):
+        return self.time.shape[0]
 
 
 def parquet_to_forecast(
@@ -49,41 +50,194 @@ def parquet_to_forecast(
     table = pq.read_table(data_path)
     df = table.to_pandas()
     time = df["from"].apply(np.datetime64).to_numpy()
-    f_carbon_intensity = df["intensity"].apply(lambda i: i["forecast"])
-    a_carbon_intensity = df["intensity"].apply(lambda i: i["actual"])
+    f_carbon_intensity = df["intensity"].apply(lambda i: i["forecast"]).to_numpy()
+    a_carbon_intensity = df["intensity"].apply(lambda i: i["actual"]).to_numpy()
     return Forecast(time, settlement_interval, f_carbon_intensity, a_carbon_intensity)
 
 
-def optimiser(load: Load, forecast: Forecast) -> list[Charge]:
-    list = []
+def state_util(load: Load, forecast: Forecast) -> tuple[list[tuple]]:
+    "Takes load and forecast as input and outputs a state vector and a discharge vector used by the optimiser."
     i_events = 0
     i_forecast = 0
-    effective_charging_rate = load.efficiency * load.charging_rate
-    discharges = load.discharges
+    sorted_discharges = sorted(load.discharges)
 
-    events = sorted(
-        [(d.start, False) for d in discharges] + [(d.end, True) for d in discharges],
-        key=lambda x: x[0],
-    )
+    transformed_discharges = [
+        (
+            d.start_time,
+            d.end_time,
+            d.power
+            * (d.end_time - d.start_time).astype("timedelta64[s]").astype("int64")
+            / 3600,
+        )
+        for d in sorted_discharges
+    ]
+
+    # Check to see if required energy doesn't exceed load capacity
+    max_required = max(transformed_discharges, key=lambda x: x[1])[2]
+    if max_required > load.capacity:
+        raise ValueError(
+            f"Required energy {max_required:.2f} kWh exceeds usable capacity {load.capacity:.2f} kWh."
+        )
+
+    d_events = [
+        (t, is_start)
+        for d in sorted_discharges
+        for t, is_start in ((d.start_time, False), (d.end_time, True))
+    ]
 
     f_times = forecast.time
+    f_carbon_intensity = forecast.f_carbon_intensity
     available = True
-
     state = []
-    while i_events < len(events) and i_forecast < len(forecast):
-        if events[i_events][0] < f_times[i_forecast]:
-            time = events[i_events]
-            available = events[i_events][1]
-            state.append(time, available)
+
+    while i_events < len(d_events) and i_forecast < len(forecast):
+        if d_events[i_events][0] < f_times[i_forecast]:
+            time = d_events[i_events][0]
+            # update energy available in state
+            if state:
+                state[-1][1] = time - state[-1][0]
+            available = d_events[i_events][1]
+            state.append([time, 0, available, f_carbon_intensity[i_forecast]])
             i_events += 1
         else:
             time = f_times[i_forecast]
-            state.append((time, available))
+            if state:
+                state[-1][1] = time - state[-1][0]
+            state.append([time, 0, available, f_carbon_intensity[i_forecast]])
             i_forecast += 1
 
     # drain events
-    if i_events < len(events):
-        state.extend(events[i_events:])
+    while i_events < len(d_events):
+        time = d_events[i_events][0]
+        if state:
+            state[-1][1] = time - state[-1][0]
+        available = d_events[i_events][1]
+        state.append([time, 0, available, f_carbon_intensity[-1]])
+        i_events += 1
+
     # drain f_times
-    for t in f_times[i_forecast:]:
-        state.append((t, available))
+    while i_forecast < len(f_times):
+        dt = forecast.settlement_interval
+        time = f_times[i_forecast]
+        state.append([time, dt, available, f_carbon_intensity[i_forecast]])
+        i_forecast += 1
+
+    return transformed_discharges, state
+
+
+def optimiser(load: Load, forecast: Forecast) -> list[ChargeSlot]:
+    transformed_discharges, state = state_util(load, forecast)
+    effective_charging_rate = load.efficiency * load.charging_rate  # kW
+    # optimisation logic
+    slots = sorted(state, key=lambda x: x[3])
+    # loading (time, duration, carbon_intensity)
+    loading = []
+    stored_E = load.initial_charge_percent * load.capacity
+    for d_start, _, req_E in transformed_discharges:
+        for slot in slots:
+            # Sufficiently Charged
+            if stored_E > req_E:
+                break
+
+            t, dt, available, c = slot
+            if t > d_start or not available:
+                continue
+            dt_s = dt.astype("timedelta64[s]").astype("int64")
+            dE = dt_s * effective_charging_rate / 3600
+
+            # Partial fill
+            if stored_E + dE > req_E:
+                partial_dt = np.timedelta64(int(dt_s * (req_E - stored_E) / dE), "s")
+                loading.append(ChargeSlot(t, partial_dt, c))
+                slot[0] = t + partial_dt
+                slot[1] = dt - partial_dt
+                # Sufficiently Charged
+                stored_E = req_E
+                break
+
+            slot[2] = False
+            stored_E += dE
+            loading.append(ChargeSlot(t, dt, c))
+
+        if stored_E < req_E:
+            print(f"Undercharged at {d_start} by {req_E - stored_E:.2f} kWh")
+
+        stored_E = max(0.0, stored_E - req_E)
+
+    return loading
+
+
+def naive_charge(load: Load, forecast: Forecast) -> list[ChargeSlot]:
+    transformed_discharges, state = state_util(load, forecast)
+    effective_charging_rate = load.efficiency * load.charging_rate
+    req_E_q = deque([d[2] for d in transformed_discharges])
+    req_E = req_E_q.leftpop()
+    stored_E = load.initial_charge_percent * load.capacity
+    loading = []
+    in_discharge = False
+    for slot in state:
+        t, dt, available, c = slot
+        if not available:
+            if not in_discharge:
+                if stored_E < req_E:
+                    print(f"Undercharged at {t} by {req_E - stored_E:.2f} kWh")
+                stored_E = max(0, stored_E - req_E)
+                if req_E_q:
+                    req_E = req_E_q.pop(0)
+            in_discharge = True
+            continue
+        in_discharge = False
+        if stored_E >= load.capacity:
+            continue
+        dt_s = dt.astype("timedelta64[s]").astype("int64")
+        dE = dt_s * effective_charging_rate / 3600
+        if stored_E + dE > load.capacity:
+            partial_dt = np.timedelta64(
+                int(dt_s * (load.capacity - stored_E) / dE), "s"
+            )
+            loading.append(ChargeSlot(t, partial_dt, c))
+            stored_E = load.capacity
+        else:
+            stored_E += dE
+            loading.append(ChargeSlot(t, dt, c))
+
+    return loading
+
+
+if __name__ == "__main__":
+    DATAPATH = Path(__file__).parent.joinpath("intensity.parquet")
+    forecast = parquet_to_forecast(DATAPATH)
+
+    # Define EV Load
+    # Most EVs have very high charging efficiency
+    efficiency = 0.95
+    capacity = 100.0
+    charging_rate = 15  # somewhere in between fast chargers and home chargers
+
+    # EV driving efficiency is often about 0.3 kWh/mile, for the purposes of demonstration we assume 30 mph for use time
+    power = 100
+    # We use standard driving times for an average person
+    morning_drive_start, morning_drive_end = np.datetime64(
+        "2026-02-27T07:30"
+    ), np.datetime64("2026-02-27T08:30")
+    evening_drive_start, evening_drive_end = np.datetime64(
+        "2026-02-27T17:30"
+    ), np.datetime64("2026-02-27T18:30")
+    morning_discharge = Discharge(morning_drive_start, morning_drive_end, power)
+    evening_discharge = Discharge(evening_drive_start, evening_drive_end, power)
+    discharges = np.array([morning_discharge, evening_discharge])
+    EV = Load(capacity, charging_rate, discharges, efficiency, 0.5)
+    print(EV.discharges[0].start_time)
+
+    optimal_charging_times = optimiser(EV, forecast)
+
+    # Cursory plots
+    fx = forecast.time
+    fy = forecast.f_carbon_intensity
+    plt.plot(fx, fy)
+    for charge in optimal_charging_times:
+        x1 = charge.start_time
+        x2 = charge.start_time + charge.duration
+        plt.fill_betweenx([0, 250], x1, x2, alpha=0.3, color="red", linewidth=0)
+
+    plt.show()
