@@ -22,7 +22,8 @@ def fetch_next(dt=now):
 
 
 if __name__ == "__main__":
-    response = fetch_next(dt=datetime.combine(date=date.today(), time=time(0)))
+    d = date(2026, 1, 1)
+    response = fetch_next(dt=datetime.combine(date=d, time=time(0)))
     df = pd.DataFrame(response.json()["data"])
     table = pa.Table.from_pandas(df)
     print(f"Writing to {DATAPATH}...")
