@@ -1,5 +1,10 @@
 from .models import CarbonTS, Discharge, Load, MergedTimeSeries
-from .ingest import daily_to_datetime, pandas_to_carbon_series, parquet_to_carbon_series
+from .data_transforms import (
+    daily_to_datetime,
+    pandas_to_carbon_series,
+    parquet_to_carbon_series,
+)
+from .ingest import fetch_batch, fetch_day, process_day, save_day
 from .utils import PiecewiseConstant, merge
 from .optimisers import greedy_naive, greedy_optimal, lp_naive, lp_optimal
 from .stats import stats
@@ -10,10 +15,15 @@ __all__ = [
     "Discharge",
     "Load",
     "MergedTimeSeries",
-    # ingest
+    # data transforms
     "daily_to_datetime",
     "pandas_to_carbon_series",
     "parquet_to_carbon_series",
+    # ingest
+    "fetch_batch",
+    "fetch_day",
+    "process_day",
+    "save_day",
     # utils
     "PiecewiseConstant",
     "merge",

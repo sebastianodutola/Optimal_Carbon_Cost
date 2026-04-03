@@ -16,6 +16,7 @@ from .models import Load, MergedTimeSeries
 # where S_eff = charging_rate · efficiency, u_k ∈ [0, a_k], a_k ∈ {0, 1}
 # ---------------------------------------------------------------------------
 
+
 def lp_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, float]:
     """Minimise carbon cost subject to battery state constraints via linear programming.
 
@@ -29,7 +30,9 @@ def lp_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray,
         return np.array([]), 0.0
 
     n = delta.size
-    Delta = np.tri(n, dtype=delta.dtype) * delta  # lower-triangular cumulative time matrix
+    Delta = (
+        np.tri(n, dtype=delta.dtype) * delta
+    )  # lower-triangular cumulative time matrix
 
     # Constraints: 0 ≤ x_k ≤ C for all k, derived from cumulative state equation
     A = np.zeros((2 * n, n), dtype=delta.dtype)
@@ -85,7 +88,9 @@ def lp_naive(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, f
     return u, cost
 
 
-def greedy_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, float]:
+def greedy_optimal(
+    x0: float, load: Load, ts: MergedTimeSeries
+) -> tuple[np.ndarray, float]:
     """Fill required energy per discharge by preferring lowest-carbon available slots.
 
     Slots are sorted globally by carbon intensity and allocated greedily per discharge event
@@ -103,7 +108,11 @@ def greedy_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndar
     stored_E = x0
 
     for discharge in sorted(load.discharges):
-        req_E = discharge.power * (discharge.end_time - discharge.start_time) / np.timedelta64(1, "h")
+        req_E = (
+            discharge.power
+            * (discharge.end_time - discharge.start_time)
+            / np.timedelta64(1, "h")
+        )
 
         for idx in sorted_by_carbon:
             if stored_E >= req_E:
@@ -115,17 +124,19 @@ def greedy_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndar
             needed = req_E - stored_E
 
             if slot_E <= needed:
-                u[idx] = remaining[idx]
+                u[idx] += remaining[idx]
                 remaining[idx] = 0.0
                 stored_E += slot_E
             else:
                 frac = needed / slot_E
                 u[idx] += frac * remaining[idx]
-                remaining[idx] *= (1.0 - frac)
+                remaining[idx] *= 1.0 - frac
                 stored_E = req_E
 
         if stored_E < req_E:
-            print(f"Undercharged at {discharge.start_time} by {req_E - stored_E:.2f} kWh")
+            print(
+                f"Undercharged at {discharge.start_time} by {req_E - stored_E:.2f} kWh"
+            )
 
         stored_E = max(0.0, stored_E - req_E)
 
@@ -133,7 +144,9 @@ def greedy_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndar
     return u, cost
 
 
-def greedy_naive(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, float]:
+def greedy_naive(
+    x0: float, load: Load, ts: MergedTimeSeries
+) -> tuple[np.ndarray, float]:
     """Charge to capacity as early as possible. No concurrent charging and discharging."""
     S = load.charging_rate * load.efficiency
     C = load.capacity
@@ -157,6 +170,7 @@ def greedy_naive(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarra
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _lp_error(status: int) -> None:
     messages = {
