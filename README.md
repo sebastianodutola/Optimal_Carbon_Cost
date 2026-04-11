@@ -8,7 +8,9 @@ forecast horizon is.
 
 Full Analysis: [analysis](https://htmlpreview.github.io/?https://github.com/sebastianodutola/Optimal_Carbon_Cost/blob/main/carbon_saving_analysis.html)
 
-## Structure
+## Repo Contains
 - `battery/` - python package with optimisers, ingest code, and models.
 - `src/` — simulation loop (can only be run after data ingested with ingest.py and ingest_actual.py)
+
+src for completeness purposes only.
 
