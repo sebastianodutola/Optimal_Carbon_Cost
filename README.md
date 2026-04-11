@@ -11,6 +11,7 @@ Full Analysis: [Carbon efficient charging of battery powered loads](https://html
 ## Repo Contains
 - `battery/` - python package with optimisers, ingest code, and models.
 - `src/` — simulation loop (can only be run after data ingested with ingest.py and ingest_actual.py)
+- `tests/` — a smokescreen test for the lp_optimiser.
 
-src for completeness purposes only.
+src and tests for completeness purposes only.
 
