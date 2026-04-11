@@ -6,7 +6,7 @@ MPC scheduling reduces EV charging carbon cost by **43–47%** using the NESO
 forecast accuracy is not the binding constraint (>92% forecast efficiency); 
 forecast horizon is.
 
-Full Analysis: [analysis](https://htmlpreview.github.io/?https://github.com/sebastianodutola/Optimal_Carbon_Cost/blob/main/carbon_saving_analysis.html](https://htmlpreview.github.io/?https://github.com/sebastianodutola/Optimal_Carbon_Cost/blob/main/carbon_saving_analysis.html)
+Full Analysis: [analysis](https://htmlpreview.github.io/?https://github.com/sebastianodutola/Optimal_Carbon_Cost/blob/main/carbon_saving_analysis.html)
 
 ## Structure
 - `battery/` - python package with optimisers, ingest code, and models.
