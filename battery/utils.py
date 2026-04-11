@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import numpy as np
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
-from .models import CarbonTS, Load, MergedTimeSeries
+import numpy as np
+import pandas as pd
+
+from .models import CarbonTS, Discharge, Load, MergedTimeSeries
 
 
 class PiecewiseConstant:
@@ -101,3 +105,84 @@ def merge(load: Load, carbon: CarbonTS) -> MergedTimeSeries:
         carbon_cost=np.array(carbon_cost),
         a=np.array(available),
     )
+
+
+def recurring_discharge(
+    times: list[tuple[time, time, float]],
+    start: datetime,
+    window: timedelta,
+) -> list[Discharge]:
+    """Instantiate Discharge objects for all occurrences within [start, start+window).
+
+    Handles the case where start falls mid-discharge (case 1): the discharge is clipped
+    to start at `start`.
+    """
+    end = start + window
+    discharges = []
+    d = start.date()
+    while d <= end.date():
+        for t_start, t_end, power in times:
+            dt_start = datetime.combine(d, t_start)
+            dt_end = datetime.combine(d, t_end)
+            if dt_start < start < dt_end:
+                discharges.append(
+                    Discharge(
+                        np.datetime64(start), np.datetime64(min(dt_end, end)), power
+                    )
+                )
+            if start <= dt_start < end:
+                discharges.append(
+                    Discharge(
+                        np.datetime64(dt_start), np.datetime64(min(dt_end, end)), power
+                    )
+                )
+        d += timedelta(days=1)
+    return discharges
+
+
+def recurring_availability(
+    times: list[tuple[time, time]],
+    start: datetime,
+    window: timedelta,
+) -> np.ndarray:
+    """Return (N, 2) datetime64 array of charging-allowed windows within [start, start+window).
+
+    Handles the case where start falls mid-window (case 1): the window is clipped to start
+    at `start`.
+    """
+    end = start + window
+    available = []
+    d = start.date()
+    while d <= end.date():
+        for t_start, t_end in times:
+            dt_start = datetime.combine(d, t_start)
+            dt_end = datetime.combine(d, t_end)
+            if dt_start < start < dt_end:
+                available.append(
+                    (np.datetime64(start), np.datetime64(min(dt_end, end)))
+                )
+            if start <= dt_start < end:
+                available.append(
+                    (np.datetime64(dt_start), np.datetime64(min(dt_end, end)))
+                )
+        d += timedelta(days=1)
+    return np.array(available)
+
+
+def forecast_range(data_path: Path, start: date, end: date, horizon_type: str):
+    """Yield (curr: datetime, forecast_slice: DataFrame) for every 30-min step in [start, end].
+
+    forecast_slice contains only rows where issued_at == curr (UTC), i.e. the forecast
+    as it was known at that exact settlement period — suitable for use in an MPC loop.
+    Reloads the parquet partition at midnight boundaries.
+    """
+
+    if horizon_type not in ("24h", "48h"):
+        raise ValueError("Horizon type must be either '24h' or '48h'")
+    curr = datetime.combine(start, time.min)
+    df = pd.read_parquet(data_path / f"{curr.date()}-{horizon_type}.parquet")
+    while curr.date() <= end:
+        yield curr, df[df["issued_at"] == pd.Timestamp(curr, tz="UTC")]
+        curr += timedelta(minutes=30)
+        if curr.time() == time(0, 0) and curr.date() <= end:
+            df = pd.read_parquet(data_path / f"{curr.date()}-{horizon_type}.parquet")

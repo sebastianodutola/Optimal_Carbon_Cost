@@ -1,3 +1,5 @@
 Data/**
 __pycache__
 .pytest_cache
+disorganised\ code
+.vscode

@@ -5,30 +5,32 @@ from tqdm import tqdm
 from pathlib import Path
 import asyncio
 
-DATADIR = Path(__file__).parent.parent / "data" / "daily"
+DATADIR = Path(__file__).parent.parent / "Data" / "daily"
 DATADIR.mkdir(parents=True, exist_ok=True)
 BASE_URL = "https://api.carbonintensity.org.uk"
-FW48 = "/intensity/{dt}/fw24h"
+FW = "/intensity/{dt}/fw{horizon_type}"
 
-MAX_CONCURRENT = 20
+MAX_CONCURRENT = 10
 
 
 async def fetch_one(
-    client: httpx.AsyncClient, dt: datetime, sem: asyncio.Semaphore
+    client: httpx.AsyncClient, dt: datetime, sem: asyncio.Semaphore, horizon_type: str
 ) -> tuple[datetime, dict]:
     async with sem:
         dt_str = dt.isoformat(timespec="minutes") + "Z"
-        url = f"{BASE_URL}{FW48.format(dt=dt_str)}"
+        url = f"{BASE_URL}{FW.format(dt=dt_str, horizon_type=horizon_type)}"
         r = await client.get(url)
         r.raise_for_status()
         return (dt, r.json())
 
 
-async def fetch_day(client: httpx.AsyncClient, day: date, sem: asyncio.Semaphore):
+async def fetch_day(
+    client: httpx.AsyncClient, day: date, sem: asyncio.Semaphore, horizon_type: str
+):
     """Fetch all 48 half-hour forecast windows for a given calendar day."""
     midnight = datetime.combine(day, time.min)
     times = [midnight + timedelta(minutes=30 * step) for step in range(48)]
-    tasks = [fetch_one(client, t, sem) for t in times]
+    tasks = [fetch_one(client, t, sem, horizon_type) for t in times]
     return await asyncio.gather(*tasks)
 
 
@@ -50,26 +52,36 @@ def month_range(start: date, end: date):
         curr = next_month
 
 
-async def fetch_batch(start: date, end: date, data_path: Path):
+async def fetch_batch(
+    start: date, end: date, data_path: Path, horizon_type: str = "48h"
+):
     data_path.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(MAX_CONCURRENT)
+    if horizon_type != "48h" and horizon_type != "24h":
+        raise ValueError("Horizon type must be '24h' or '48h'")
 
     default_forecast, default_actual = 100, 100
     async with httpx.AsyncClient(timeout=30.0) as client:
         for day in tqdm(list(date_range(start, end))):
-            if _partition_path(data_path, day).exists():
+            if _partition_path(data_path, day, horizon_type).exists():
                 continue
-            res = await fetch_day(client, day, sem)
+            res = await fetch_day(client, day, sem, horizon_type=horizon_type)
             df = process_day(res)
-            df = repair_day(df, day, default_forecast, default_actual)
+            df = repair_day(
+                df, day, default_forecast, default_actual, horizon_type=horizon_type
+            )
             last = df[df["issued_at"] == df["issued_at"].max()].iloc[1]
             default_forecast = int(last["forecast"])
             default_actual = int(last["actual"])
-            save_day(df, data_path)
+            save_day(df, data_path, horizon_type)
 
 
 def repair_day(
-    df_day: pd.DataFrame, day: date, default_forecast: int, default_actual: int
+    df_day: pd.DataFrame,
+    day: date,
+    default_forecast: int,
+    default_actual: int,
+    horizon_type: str,
 ) -> pd.DataFrame:
     """
     df_day:     single day's raw data
@@ -80,12 +92,21 @@ def repair_day(
         start=pd.Timestamp(day), periods=48, freq="30min", tz="UTC"
     )
 
-    # Each issued_at pairs with exactly 49 consecutive period_starts:
-    # [issued_at - 30min, ..., issued_at + 23h30min]  → 48 × 49 = 2352 rows
     rows = []
+
+    if horizon_type == "48h":
+        num_periods = 97
+    elif horizon_type == "24h":
+        num_periods = 49
+    else:
+        raise ValueError("horizon type must be '48h' or '24h'")
+
     for issued_at in expected_issued:
         periods = pd.date_range(
-            start=issued_at - pd.Timedelta("30min"), periods=49, freq="30min", tz="UTC"
+            start=issued_at - pd.Timedelta("30min"),
+            periods=num_periods,
+            freq="30min",
+            tz="UTC",
         )
         rows.append(pd.DataFrame({"issued_at": issued_at, "period_start": periods}))
     skeleton = pd.concat(rows, ignore_index=True)
@@ -162,26 +183,29 @@ def process_day(res: list) -> pd.DataFrame:
     return df.drop_duplicates(subset=["issued_at", "period_start"])
 
 
-def save_day(df: pd.DataFrame, data_path: Path):
+def save_day(df: pd.DataFrame, data_path: Path, horizon_type: str):
     """
     Saves one day's DataFrame as a parquet partition: data_path/YYYY-MM-DD.parquet
     Derived from the date of the earliest issued_at in the DataFrame.
     """
-    out = _partition_path(data_path, df["issued_at"].min().date())
+    out = _partition_path(
+        data_path, df["issued_at"].min().date(), horizon_type=horizon_type
+    )
     df.to_parquet(out, index=False)
 
 
-def _partition_path(data_path: Path, day: date) -> Path:
-    return data_path / f"{day}.parquet"
+def _partition_path(data_path: Path, day: date, horizon_type: str) -> Path:
+    return data_path / f"{day}-{horizon_type}.parquet"
 
 
-async def _run():
+async def _run(horizon_type: str):
     start = date(2025, 1, 1)
     end = date(2026, 1, 1)
     for batch_start, batch_end in month_range(start, end):
         print(f"Fetching {batch_start} -> {batch_end}")
-        await fetch_batch(batch_start, batch_end, DATADIR)
+        await fetch_batch(batch_start, batch_end, DATADIR, horizon_type=horizon_type)
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    asyncio.run(_run("24h"))
+    asyncio.run(_run("48h"))

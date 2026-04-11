@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.optimize import linprog
+from scipy.sparse import diags, eye, hstack
 
 from .models import Load, MergedTimeSeries
 
@@ -29,32 +30,27 @@ def lp_optimal(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray,
     if delta.size == 0:
         return np.array([]), 0.0
 
-    n = delta.size
-    Delta = (
-        np.tri(n, dtype=delta.dtype) * delta
-    )  # lower-triangular cumulative time matrix
+    # More efficient method:
+    n = len(delta)
+    U_block = diags(-S * delta)
+    X_block = diags([np.ones(n), -np.ones(n - 1)], offsets=[0, -1])
 
-    # Constraints: 0 ≤ x_k ≤ C for all k, derived from cumulative state equation
-    A = np.zeros((2 * n, n), dtype=delta.dtype)
-    A[:n, :] = Delta
-    A[n:, :] = -Delta
+    A_eq = hstack([U_block, X_block])
+    b_eq = -delta * d
+    b_eq[0] += x0
 
-    b = np.zeros(2 * n, dtype=delta.dtype)
-    b[:n] = (C - x0) * np.ones(n) + Delta @ d
-    b[n:] = x0 * np.ones(n) - Delta @ d
-    b /= S
-
-    c = delta * carbon_intensity
-    bounds = np.zeros((n, 2))
-    bounds[:, 1] = a  # u_i ∈ [0, a_i]
-
-    res = linprog(c=c, A_ub=A, b_ub=b, bounds=bounds)
+    c = np.zeros(2 * n)
+    c[:n] = delta * carbon_intensity
+    bounds = np.zeros((2 * n, 2))
+    bounds[:n, 1] = a  # u_i ∈ [0, a_i]
+    bounds[n:, 1] = C
+    res = linprog(c=c, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
 
     if not res.success:
         _lp_error(res.status)
         return None
 
-    return res.x, float(res.fun)
+    return res.x, float(res.fun) * S
 
 
 def lp_naive(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, float]:
@@ -84,7 +80,7 @@ def lp_naive(x0: float, load: Load, ts: MergedTimeSeries) -> tuple[np.ndarray, f
                 u[i] = max(0.0, (C - x + d[i] * delta[i]) / (S * delta[i]))
         x = x + S * u[i] * delta[i] - d[i] * delta[i]
 
-    cost = float(np.dot(delta * carbon_intensity, u))
+    cost = float(np.dot(delta * carbon_intensity, u)) * S
     return u, cost
 
 
@@ -100,6 +96,14 @@ def greedy_optimal(
     n = ts.delta.size
     u = np.zeros(n)
     remaining = np.ones(n)  # fraction of each slot still unallocated
+
+    # Check valid for greedy algorithm
+    if ((ts.a > 0) & (ts.d > 0)).any():
+        raise ValueError(
+            """The greedy algorithm can only be used on loads where discharge 
+            times and availability are mutually exclusive.\n 
+            use lp_optimal if discharge times and availability overlap."""
+        )
 
     # Eligible: available and not discharging
     eligible = np.where((ts.a > 0) & (ts.d == 0))[0]
@@ -140,7 +144,7 @@ def greedy_optimal(
 
         stored_E = max(0.0, stored_E - req_E)
 
-    cost = float(np.dot(ts.delta * ts.carbon_cost, u))
+    cost = float(np.dot(ts.delta * ts.carbon_cost, u)) * S
     return u, cost
 
 
@@ -154,6 +158,13 @@ def greedy_naive(
     u = np.zeros(n)
     x = x0
 
+    if ((ts.a > 0) & (ts.d > 0)).any():
+        raise ValueError(
+            """The greedy algorithm can only be used on loads where discharge 
+            times and availability are mutually exclusive.\n 
+            use lp_optimal if discharge times and availability overlap."""
+        )
+
     for i in range(n):
         if ts.a[i] > 0 and ts.d[i] == 0:
             x_at_max = x + S * ts.delta[i]
@@ -163,7 +174,7 @@ def greedy_naive(
                 u[i] = max(0.0, (C - x) / (S * ts.delta[i]))
         x = x + S * u[i] * ts.delta[i] - ts.d[i] * ts.delta[i]
 
-    cost = float(np.dot(ts.delta * ts.carbon_cost, u))
+    cost = float(np.dot(ts.delta * ts.carbon_cost, u)) * S
     return u, cost
 
 
