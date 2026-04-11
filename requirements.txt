@@ -1,0 +1,10 @@
+httpx>=0.28.1
+matplotlib>=3.10.7
+numpy>=2.3.4
+pandas>=2.3.3
+pyarrow>=23.0.1
+scipy>=1.16.3
+tqdm>=4.67.1
+
+# dev / test
+pytest>=9.0.2
