@@ -8,7 +8,7 @@ forecast horizon is.
 
 <img width="1189" height="812" alt="image" src="https://github.com/user-attachments/assets/4d4b21d7-5afe-430b-ade2-fb857ead0e70" />
 
-Full Analysis: [Carbon efficient charging of battery powered loads](https://htmlpreview.github.io/?https://github.com/sebastianodutola/Optimal_Carbon_Cost/blob/main/carbon_saving_analysis.html)
+Full Analysis: [Carbon efficient charging of battery powered loads](https://sebastianodutola.github.io/Optimal_Carbon_Cost/carbon_saving_analysis.html)
 
 ## Repo Contains
 - `battery/` - python package with optimisers, ingest code, and models.
